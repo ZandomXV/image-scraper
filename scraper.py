@@ -257,52 +257,135 @@ def search_images(query, max_images):
     if len(found) >= max_images:
         return found[:max_images]
 
-    # --- Engine 0.5: Reddit JSON API (include_over_18=on, no filtering) ---
-    print(f"  >> Trying Reddit... (have {len(found)} so far)")
-    reddit_subs = ['all', 'pics', 'nsfw', 'RealGirls', 'gonewild', 'nsfw_gif',
-                   'amateur', 'porn', 'hentai', 'rule34', 'ass', 'boobs',
-                   'cumsluts', 'milf', 'teen', 'Asian', 'Latinas', 'Ebony',
-                   'Blowjobs', 'anal', 'threesome', 'public', 'creampie']
-    for q in query_variants[:5]:
+    # --- Engine 0.5: Reddit (hot posts from NSFW subs + search, include_over_18=on) ---
+    print(f"  >> Trying Reddit (hot + search)... (have {len(found)} so far)")
+    reddit_subs = ['gonewild', 'RealGirls', 'amateur', 'nsfw', 'porn', 'ass',
+                   'boobs', 'cumsluts', 'milf', 'Asian', 'Latinas', 'Ebony',
+                   'Blowjobs', 'anal', 'threesome', 'public', 'creampie',
+                   'pussy', 'fitgirls', 'blonde', 'brunette', 'redhead',
+                   'tits', 'nipples', 'lingerie', 'stockings', 'panties',
+                   'thongs', 'upskirts', 'downblouse', 'jilling', 'treesgonewild',
+                   'GWCouples', 'gonewildcurvy', 'PetiteGoneWild', 'GoneWildPlus',
+                   'AsiansGoneWild', 'LegalTeens', 'CollegeAmateurs', 'BustyPetite',
+                   'adorableporn', 'porninfifteenseconds', 'nsfw_gif', 'adultgifs']
+    reddit_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+
+    # First: fetch HOT posts from each sub (no search query needed)
+    for sub in reddit_subs:
         if len(found) >= max_images:
             break
-        for sub in reddit_subs:
-            if len(found) >= max_images:
-                break
-            try:
-                reddit_url = f"https://www.reddit.com/r/{sub}/search.json?q={quote_plus(q)}&restrict_sr=on&include_over_18=on&sort=relevance&limit=100"
-                resp = session.get(reddit_url, timeout=20, headers={'User-Agent': UA})
-                if resp.status_code != 200:
-                    continue
-                data = resp.json()
-                posts = data.get('data', {}).get('children', [])
-                new = 0
-                for post in posts:
-                    p = post.get('data', {})
-                    u = p.get('url', '')
-                    # Direct image links
-                    if u and IMG_EXT_RE.search(u) and u not in seen and is_valid_url(u):
-                        seen.add(u); found.append(u); new += 1
-                        if len(found) >= max_images: break
-                    # Imgur direct image (convert imgur.com/xxx to i.imgur.com/xxx.jpg)
-                    if 'imgur.com/' in u and 'i.imgur' not in u:
-                        imgur_id = u.rstrip('/').split('/')[-1]
-                        if imgur_id and '?' not in imgur_id:
-                            direct = f"https://i.imgur.com/{imgur_id}.jpg"
-                            if direct not in seen and is_valid_url(direct):
-                                seen.add(direct); found.append(direct); new += 1
-                                if len(found) >= max_images: break
-                    # Reddit preview images
-                    preview = p.get('preview', {}).get('images', [])
-                    for pv in preview:
-                        pu = pv.get('source', {}).get('url', '').replace('&amp;', '&')
-                        if pu and pu not in seen and is_valid_url(pu):
-                            seen.add(pu); found.append(pu); new += 1
-                            if len(found) >= max_images: break
-                if new > 0:
-                    print(f"  [Reddit r/{sub} q='{q}'] +{new} (total {len(found)})")
-            except Exception as e:
+        try:
+            reddit_url = f"https://www.reddit.com/r/{sub}/hot.json?limit=100&include_over_18=on"
+            resp = session.get(reddit_url, timeout=15, headers=reddit_headers)
+            if resp.status_code != 200:
                 continue
+            data = resp.json()
+            posts = data.get('data', {}).get('children', [])
+            new = 0
+            for post in posts:
+                p = post.get('data', {})
+                if not p.get('over_18', False):
+                    continue
+                u = p.get('url', '')
+                if u and IMG_EXT_RE.search(u) and u not in seen and is_valid_url(u):
+                    seen.add(u); found.append(u); new += 1
+                    if len(found) >= max_images: break
+                # Imgur conversion
+                if 'imgur.com/' in u and 'i.imgur' not in u:
+                    imgur_id = u.rstrip('/').split('/')[-1]
+                    if imgur_id and '?' not in imgur_id:
+                        direct = f"https://i.imgur.com/{imgur_id}.jpg"
+                        if direct not in seen and is_valid_url(direct):
+                            seen.add(direct); found.append(direct); new += 1
+                            if len(found) >= max_images: break
+                # Reddit preview images
+                preview = p.get('preview', {}).get('images', [])
+                for pv in preview:
+                    pu = pv.get('source', {}).get('url', '').replace('&amp;', '&')
+                    if pu and pu not in seen and is_valid_url(pu):
+                        seen.add(pu); found.append(pu); new += 1
+                        if len(found) >= max_images: break
+                # Reddit video thumbnails
+                rt = p.get('thumbnail', '')
+                if rt and rt.startswith('http') and rt not in seen and is_valid_url(rt):
+                    seen.add(rt); found.append(rt); new += 1
+                    if len(found) >= max_images: break
+            if new > 0:
+                print(f"  [Reddit r/{sub} hot] +{new} (total {len(found)})")
+        except:
+            continue
+
+    # Also search Reddit with the query
+    for q in query_variants[:3]:
+        if len(found) >= max_images:
+            break
+        try:
+            reddit_url = f"https://www.reddit.com/search.json?q={quote_plus(q)}&include_over_18=on&sort=relevance&limit=100&type=link"
+            resp = session.get(reddit_url, timeout=15, headers=reddit_headers)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            posts = data.get('data', {}).get('children', [])
+            new = 0
+            for post in posts:
+                p = post.get('data', {})
+                u = p.get('url', '')
+                if u and IMG_EXT_RE.search(u) and u not in seen and is_valid_url(u):
+                    seen.add(u); found.append(u); new += 1
+                    if len(found) >= max_images: break
+                if 'imgur.com/' in u and 'i.imgur' not in u:
+                    imgur_id = u.rstrip('/').split('/')[-1]
+                    if imgur_id and '?' not in imgur_id:
+                        direct = f"https://i.imgur.com/{imgur_id}.jpg"
+                        if direct not in seen and is_valid_url(direct):
+                            seen.add(direct); found.append(direct); new += 1
+                            if len(found) >= max_images: break
+                preview = p.get('preview', {}).get('images', [])
+                for pv in preview:
+                    pu = pv.get('source', {}).get('url', '').replace('&amp;', '&')
+                    if pu and pu not in seen and is_valid_url(pu):
+                        seen.add(pu); found.append(pu); new += 1
+                        if len(found) >= max_images: break
+            if new > 0:
+                print(f"  [Reddit search q='{q}'] +{new} (total {len(found)})")
+        except:
+            continue
+
+    if len(found) >= max_images:
+        return found[:max_images]
+
+    # --- Engine 0.6: Direct adult site scraping (sex.com, pornpics, pichunter) ---
+    print(f"  >> Trying adult image sites... (have {len(found)} so far)")
+    adult_sites = [
+        f"https://www.sex.com/search/pics?query={quote_plus(query)}",
+        f"https://www.pornpics.com/search/{quote_plus(query.replace(' ', '-'))}/",
+        f"https://www.pichunter.com/tag/{quote_plus(query.replace(' ', '+'))}/",
+        f"https://www.imagepost.com/?s={quote_plus(query)}",
+    ]
+    for site_url in adult_sites:
+        if len(found) >= max_images:
+            break
+        try:
+            resp = session.get(site_url, timeout=20, headers={'User-Agent': UA})
+            if resp.status_code != 200:
+                continue
+            html = resp.text
+            # Extract all image URLs from the page
+            imgs = extract_image_urls(site_url, html)
+            new = 0
+            for u in imgs:
+                if u not in seen and is_valid_url(u):
+                    # Filter out tiny thumbnails/icons
+                    if any(x in u.lower() for x in ['logo', 'icon', 'avatar', 'banner', 'sprite', 'button', 'placeholder']):
+                        continue
+                    seen.add(u); found.append(u); new += 1
+                    if len(found) >= max_images: break
+            site_name = site_url.split('/')[2]
+            if new > 0:
+                print(f"  [Direct {site_name}] +{new} (total {len(found)})")
+        except Exception as e:
+            print(f"  [Direct {site_url}] Error: {e}")
+            continue
 
     if len(found) >= max_images:
         return found[:max_images]
