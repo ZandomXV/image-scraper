@@ -185,15 +185,29 @@ def crawl_for_images(start_url, max_images, depth, max_pages):
 
 
 def search_bing_images(query, max_images):
-    """Scrape Bing Images search results (full-res murl URLs)."""
+    """Scrape Bing Images search results (full-res murl URLs). SafeSearch OFF."""
     from urllib.parse import quote_plus
     found, seen = [], set()
+
+    # Set cookies to force SafeSearch OFF
+    session.cookies.set('_SS', 'SRCHHPGUSR=ADLT=OFF&SRCHHPGUSR=ADLT=OFF', domain='.bing.com')
+    session.cookies.set('SRCHHPGUSR', 'ADLT=OFF', domain='.bing.com')
+    session.cookies.set('_EDGE_S', 'mkt=en-us&ui=en-us&ADLT=off', domain='.bing.com')
+
+    # Try multiple query variations to get past early stop
+    query_variants = [query, f"{query} photos", f"{query} images", f"{query} HD",
+                      f"{query} wallpaper", f"{query} picture", f"{query} pic",
+                      f"{query} photo gallery", f'"{query}"', f"{query} site:pinterest.com"]
+    variant_idx = 0
     first = 1
     page = 0
-    while len(found) < max_images and page < 30:
+    consecutive_empty = 0
+
+    while len(found) < max_images and variant_idx < len(query_variants):
         page += 1
+        q = query_variants[variant_idx]
         search_url = (
-            f"https://www.bing.com/images/search?q={quote_plus(query)}"
+            f"https://www.bing.com/images/search?q={quote_plus(q)}"
             f"&first={first}&count=35&form=HDRSC2&safesearch=off&adlt=off"
         )
         try:
@@ -201,9 +215,11 @@ def search_bing_images(query, max_images):
             resp.raise_for_status()
         except Exception as e:
             print(f"  Bing search error: {e}")
-            break
+            variant_idx += 1
+            first = 1
+            page = 0
+            continue
         html = resp.text
-        # murl holds the full-resolution image URL inside the m="{...}" JSON
         murls = re.findall(r'&quot;murl&quot;:&quot;(.*?)&quot;', html)
         murls += re.findall(r'"murl":"(.*?)"', html)
         new = 0
@@ -215,9 +231,18 @@ def search_bing_images(query, max_images):
                 new += 1
                 if len(found) >= max_images:
                     break
-        print(f"  [Bing page {page}] +{new} images (total {len(found)})")
+        print(f"  [Bing q='{q}' p{page}] +{new} images (total {len(found)})")
         if new == 0:
-            break
+            consecutive_empty += 1
+            if consecutive_empty >= 2:
+                # Move to next query variant
+                variant_idx += 1
+                first = 1
+                page = 0
+                consecutive_empty = 0
+                print(f"  Switching to query variant: {query_variants[variant_idx] if variant_idx < len(query_variants) else 'done'}")
+            continue
+        consecutive_empty = 0
         first += 35
     return found[:max_images]
 
