@@ -215,6 +215,48 @@ def search_images(query, max_images):
     if len(found) >= max_images:
         return found[:max_images]
 
+    # --- Engine 0.1: Adult image board APIs (Gelbooru, Rule34, Danbooru, Konachan, Yandere) ---
+    # These have public JSON APIs, zero filtering, work from any IP
+    print("  >> Trying adult image boards (Gelbooru/Rule34/Danbooru)...")
+    boards = [
+        ("Gelbooru", "https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1&limit=100&tags="),
+        ("Rule34",   "https://api.rule34.xxx/index.php?page=dapi&s=post&q=index&json=1&limit=100&tags="),
+        ("Danbooru", "https://danbooru.donmai.us/posts.json?limit=100&tags="),
+        ("Konachan", "https://konachan.com/post.json?limit=100&tags="),
+        ("Yandere",  "https://yande.re/post.json?limit=100&tags="),
+    ]
+    for q in query_variants[:5]:
+        if len(found) >= max_images:
+            break
+        tags = quote_plus(q.replace(' ', '_'))
+        for name, base_url in boards:
+            if len(found) >= max_images:
+                break
+            try:
+                url = base_url + tags
+                resp = session.get(url, timeout=20, headers={'User-Agent': UA, 'Accept': 'application/json'})
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                # Gelbooru/Rule34 return list of dicts with 'file_url' or 'sample_url'
+                # Danbooru/Konachan/Yandere return list of dicts with 'file_url' or 'large_file_url'
+                posts = data if isinstance(data, list) else data.get('post', [])
+                new = 0
+                for p in posts:
+                    if isinstance(p, dict):
+                        u = p.get('file_url') or p.get('sample_url') or p.get('large_file_url') or p.get('preview_url') or ''
+                        if u and u not in seen and is_valid_url(u):
+                            seen.add(u); found.append(u); new += 1
+                            if len(found) >= max_images: break
+                if new > 0:
+                    print(f"  [{name} q='{q}'] +{new} (total {len(found)})")
+            except Exception as e:
+                print(f"  [{name} q='{q}'] Error: {e}")
+                continue
+
+    if len(found) >= max_images:
+        return found[:max_images]
+
     # --- Engine 0.5: Reddit JSON API (include_over_18=on, no filtering) ---
     print(f"  >> Trying Reddit... (have {len(found)} so far)")
     reddit_subs = ['all', 'pics', 'nsfw', 'RealGirls', 'gonewild', 'nsfw_gif',
