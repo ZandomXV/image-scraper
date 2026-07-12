@@ -185,65 +185,87 @@ def crawl_for_images(start_url, max_images, depth, max_pages):
 
 
 def search_bing_images(query, max_images):
-    """Scrape Bing Images search results (full-res murl URLs). SafeSearch OFF."""
-    from urllib.parse import quote_plus
+    """Search DuckDuckGo Images with SafeSearch OFF (kp=-1)."""
+    from urllib.parse import quote_plus, urlencode
+    import json as _json
     found, seen = [], set()
 
-    # Set cookies to force SafeSearch OFF
-    session.cookies.set('_SS', 'SRCHHPGUSR=ADLT=OFF&SRCHHPGUSR=ADLT=OFF', domain='.bing.com')
-    session.cookies.set('SRCHHPGUSR', 'ADLT=OFF', domain='.bing.com')
-    session.cookies.set('_EDGE_S', 'mkt=en-us&ui=en-us&ADLT=off', domain='.bing.com')
-
-    # Try multiple query variations to get past early stop
     query_variants = [query, f"{query} photos", f"{query} images", f"{query} HD",
                       f"{query} wallpaper", f"{query} picture", f"{query} pic",
                       f"{query} photo gallery", f'"{query}"', f"{query} site:pinterest.com"]
-    variant_idx = 0
-    first = 1
-    page = 0
-    consecutive_empty = 0
 
-    while len(found) < max_images and variant_idx < len(query_variants):
-        page += 1
-        q = query_variants[variant_idx]
-        search_url = (
-            f"https://www.bing.com/images/search?q={quote_plus(q)}"
-            f"&first={first}&count=35&form=HDRSC2&safesearch=off&adlt=off"
-        )
+    for qi, q in enumerate(query_variants):
+        if len(found) >= max_images:
+            break
         try:
-            resp = session.get(search_url, timeout=30)
+            # Get the vqd token from the main search page
+            page_url = f"https://duckduckgo.com/?q={quote_plus(q)}&iax=images&ia=images"
+            resp = session.get(page_url, timeout=30)
             resp.raise_for_status()
-        except Exception as e:
-            print(f"  Bing search error: {e}")
-            variant_idx += 1
-            first = 1
-            page = 0
-            continue
-        html = resp.text
-        murls = re.findall(r'&quot;murl&quot;:&quot;(.*?)&quot;', html)
-        murls += re.findall(r'"murl":"(.*?)"', html)
-        new = 0
-        for u in murls:
-            u = u.replace('\\/', '/').replace('&amp;', '&')
-            if u and u not in seen and is_valid_url(u):
-                seen.add(u)
-                found.append(u)
-                new += 1
-                if len(found) >= max_images:
+            html = resp.text
+            # Extract vqd from the page
+            vqd_match = re.search(r'vqd=["\']([^"\']+)["\']', html)
+            if not vqd_match:
+                vqd_match = re.search(r'vqd=([a-f0-9-]+)', html)
+            if not vqd_match:
+                print(f"  [DDG q='{q}'] Could not get vqd token, skipping")
+                continue
+            vqd = vqd_match.group(1)
+
+            # Now fetch image results via the i.js endpoint
+            s = 0
+            while len(found) < max_images:
+                params = {
+                    'l': 'us-en',
+                    'o': 'json',
+                    'q': q,
+                    'vqd': vqd,
+                    'f': ',,,,,',
+                    'p': '1',
+                    'kp': '-1',  # SafeSearch OFF
+                    's': str(s),
+                }
+                api_url = f"https://duckduckgo.com/i.js?{urlencode(params)}"
+                try:
+                    resp2 = session.get(api_url, timeout=30)
+                    resp2.raise_for_status()
+                except Exception as e:
+                    print(f"  [DDG q='{q}' s={s}] API error: {e}")
                     break
-        print(f"  [Bing q='{q}' p{page}] +{new} images (total {len(found)})")
-        if new == 0:
-            consecutive_empty += 1
-            if consecutive_empty >= 2:
-                # Move to next query variant
-                variant_idx += 1
-                first = 1
-                page = 0
-                consecutive_empty = 0
-                print(f"  Switching to query variant: {query_variants[variant_idx] if variant_idx < len(query_variants) else 'done'}")
+
+                try:
+                    data = resp2.json()
+                except Exception:
+                    print(f"  [DDG q='{q}' s={s}] No JSON response")
+                    break
+
+                results = data.get('results', [])
+                if not results:
+                    print(f"  [DDG q='{q}' s={s}] No more results")
+                    break
+
+                new = 0
+                for r in results:
+                    u = r.get('image') or r.get('thumbnail') or ''
+                    if not u:
+                        continue
+                    u = u.replace('\\/', '/')
+                    if u and u not in seen and is_valid_url(u):
+                        seen.add(u)
+                        found.append(u)
+                        new += 1
+                        if len(found) >= max_images:
+                            break
+
+                print(f"  [DDG q='{q}' s={s}] +{new} images (total {len(found)})")
+                if new == 0:
+                    break
+                s += 100
+
+        except Exception as e:
+            print(f"  [DDG q='{q}'] Error: {e}")
             continue
-        consecutive_empty = 0
-        first += 35
+
     return found[:max_images]
 
 
