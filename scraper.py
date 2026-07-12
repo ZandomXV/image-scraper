@@ -215,6 +215,56 @@ def search_images(query, max_images):
     if len(found) >= max_images:
         return found[:max_images]
 
+    # --- Engine 0.5: Reddit JSON API (include_over_18=on, no filtering) ---
+    print(f"  >> Trying Reddit... (have {len(found)} so far)")
+    reddit_subs = ['all', 'pics', 'nsfw', 'RealGirls', 'gonewild', 'nsfw_gif',
+                   'amateur', 'porn', 'hentai', 'rule34', 'ass', 'boobs',
+                   'cumsluts', 'milf', 'teen', 'Asian', 'Latinas', 'Ebony',
+                   'Blowjobs', 'anal', 'threesome', 'public', 'creampie']
+    for q in query_variants[:5]:
+        if len(found) >= max_images:
+            break
+        for sub in reddit_subs:
+            if len(found) >= max_images:
+                break
+            try:
+                reddit_url = f"https://www.reddit.com/r/{sub}/search.json?q={quote_plus(q)}&restrict_sr=on&include_over_18=on&sort=relevance&limit=100"
+                resp = session.get(reddit_url, timeout=20, headers={'User-Agent': UA})
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                posts = data.get('data', {}).get('children', [])
+                new = 0
+                for post in posts:
+                    p = post.get('data', {})
+                    u = p.get('url', '')
+                    # Direct image links
+                    if u and IMG_EXT_RE.search(u) and u not in seen and is_valid_url(u):
+                        seen.add(u); found.append(u); new += 1
+                        if len(found) >= max_images: break
+                    # Imgur direct image (convert imgur.com/xxx to i.imgur.com/xxx.jpg)
+                    if 'imgur.com/' in u and 'i.imgur' not in u:
+                        imgur_id = u.rstrip('/').split('/')[-1]
+                        if imgur_id and '?' not in imgur_id:
+                            direct = f"https://i.imgur.com/{imgur_id}.jpg"
+                            if direct not in seen and is_valid_url(direct):
+                                seen.add(direct); found.append(direct); new += 1
+                                if len(found) >= max_images: break
+                    # Reddit preview images
+                    preview = p.get('preview', {}).get('images', [])
+                    for pv in preview:
+                        pu = pv.get('source', {}).get('url', '').replace('&amp;', '&')
+                        if pu and pu not in seen and is_valid_url(pu):
+                            seen.add(pu); found.append(pu); new += 1
+                            if len(found) >= max_images: break
+                if new > 0:
+                    print(f"  [Reddit r/{sub} q='{q}'] +{new} (total {len(found)})")
+            except Exception as e:
+                continue
+
+    if len(found) >= max_images:
+        return found[:max_images]
+
     # --- Engine 1: DuckDuckGo i.js API ---
     print("  >> Trying DuckDuckGo API...")
     for q in query_variants:
