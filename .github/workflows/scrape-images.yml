@@ -54,21 +54,18 @@ jobs:
           MAX_PAGES: ${{ inputs.max_pages }}
         run: python scraper.py
 
-      - name: Create zip archive
+      - name: Check results
         run: |
           mkdir -p downloaded_images
           count=$(find downloaded_images -type f | wc -l)
           echo "Image files found: $count"
           if [ "$count" -eq 0 ]; then
-            echo "No images were scraped. Adding a note file so the archive is still produced."
             echo "No images were found for the provided URL(s)." > downloaded_images/NO_IMAGES_FOUND.txt
           fi
-          cd downloaded_images
-          zip -r ../images.zip .
 
       - name: Upload images as artifact
         uses: actions/upload-artifact@v4
         with:
           name: scraped-images
-          path: images.zip
+          path: downloaded_images/
           retention-days: 7
