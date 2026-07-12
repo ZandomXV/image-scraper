@@ -1,0 +1,50 @@
+name: Image Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'Comma-separated list of URLs to scrape for images'
+        required: true
+        type: string
+      max_images:
+        description: 'Maximum number of images to scrape per URL (default: 50)'
+        required: false
+        type: number
+        default: 50
+
+jobs:
+  scrape-images:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Run image scraper
+        env:
+          URLS: ${{ inputs.urls }}
+          MAX_IMAGES: ${{ inputs.max_images }}
+        run: python scraper.py
+
+      - name: Create zip archive
+        run: |
+          cd downloaded_images
+          zip -r ../images.zip .
+
+      - name: Upload images as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraped-images
+          path: images.zip
+          retention-days: 7
