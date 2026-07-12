@@ -45,16 +45,25 @@ def pick_from_srcset(srcset):
     return best
 
 
+def normalize_url(u):
+    u = u.strip()
+    if not u:
+        return u
+    if not re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', u):
+        u = 'https://' + u
+    return u
+
+
 def extract_image_urls(page_url, html):
-    """Aggressively pull image URLs from many sources."""
+    """Aggressively pull image URLs from every possible source."""
     soup = BeautifulSoup(html, 'html.parser')
     found = []
 
     def add(u):
         if not u:
             return
-        u = u.strip()
-        if u.startswith('data:'):
+        u = u.strip().strip('"\'')
+        if not u or u.startswith('data:'):
             return
         absu = urljoin(page_url, u)
         if is_valid_url(absu):
@@ -80,14 +89,16 @@ def extract_image_urls(page_url, html):
         if source.get('data-srcset'):
             add(pick_from_srcset(source.get('data-srcset')))
 
-    # <a href> pointing directly at images
-    for a in soup.find_all('a', href=True):
-        if IMG_EXT_RE.search(a['href']):
-            add(a['href'])
+    # <a href> and any tag/attribute whose value points at an image
+    for tag in soup.find_all(True):
+        for attr_val in tag.attrs.values():
+            vals = attr_val if isinstance(attr_val, list) else [attr_val]
+            for v in vals:
+                if isinstance(v, str) and IMG_EXT_RE.search(v):
+                    add(v)
 
-    # inline style + <style> background-image
-    style_urls = re.findall(r'url\((["\']?)(.*?)\1\)', html, re.I)
-    for _, u in style_urls:
+    # inline style + <style> background-image: url(...)
+    for _, u in re.findall(r'url\((["\']?)(.*?)\1\)', html, re.I):
         if u and not u.startswith('data:'):
             add(u)
 
@@ -96,6 +107,15 @@ def extract_image_urls(page_url, html):
         prop = (meta.get('property') or meta.get('name') or '').lower()
         if prop in ('og:image', 'twitter:image') and meta.get('content'):
             add(meta['content'])
+
+    # <noscript> often holds real <img> for lazy sites
+    for ns in soup.find_all('noscript'):
+        for m in re.findall(r'src=["\']([^"\']+)["\']', ns.decode_contents(), re.I):
+            add(m)
+
+    # Raw regex sweep of the entire HTML/JSON (catches JS-embedded URLs)
+    for m in re.findall(r'https?:\\?/\\?/[^\s"\'<>()]+?\.(?:jpe?g|png|gif|webp|svg|bmp|avif|tiff?)(?:\?[^\s"\'<>()]*)?', html, re.I):
+        add(m.replace('\\/', '/'))
 
     # dedupe, preserve order
     seen, uniq = set(), []
@@ -106,15 +126,100 @@ def extract_image_urls(page_url, html):
     return uniq
 
 
-def get_image_urls(url, max_images):
-    try:
-        resp = session.get(url, timeout=30)
-        resp.raise_for_status()
-        urls = extract_image_urls(url, resp.text)
-        return urls[:max_images]
-    except Exception as e:
-        print(f"Error scraping {url}: {e}")
-        return []
+def extract_links(page_url, html, same_domain_only=True):
+    """Return same-domain page links for crawling."""
+    soup = BeautifulSoup(html, 'html.parser')
+    base_host = urlparse(page_url).netloc
+    links = []
+    seen = set()
+    for a in soup.find_all('a', href=True):
+        href = a['href'].strip()
+        if href.startswith(('mailto:', 'tel:', 'javascript:', '#')):
+            continue
+        absu = urljoin(page_url, href)
+        if not is_valid_url(absu):
+            continue
+        if same_domain_only and urlparse(absu).netloc != base_host:
+            continue
+        absu = absu.split('#')[0]
+        if absu not in seen:
+            seen.add(absu)
+            links.append(absu)
+    return links
+
+
+def crawl_for_images(start_url, max_images, depth, max_pages):
+    """BFS crawl same-domain pages, collecting image URLs."""
+    visited = set()
+    queue = [(start_url, 0)]
+    all_imgs, img_seen = [], set()
+    pages_done = 0
+
+    while queue and pages_done < max_pages and len(all_imgs) < max_images:
+        url, d = queue.pop(0)
+        if url in visited:
+            continue
+        visited.add(url)
+        try:
+            resp = session.get(url, timeout=30)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"  Error fetching {url}: {e}")
+            continue
+        pages_done += 1
+        html = resp.text
+        imgs = extract_image_urls(url, html)
+        new = 0
+        for u in imgs:
+            if u not in img_seen:
+                img_seen.add(u)
+                all_imgs.append(u)
+                new += 1
+        print(f"  [page {pages_done}] {url[:70]} -> +{new} images (total {len(all_imgs)})")
+        if d < depth:
+            for link in extract_links(url, html):
+                if link not in visited:
+                    queue.append((link, d + 1))
+
+    return all_imgs[:max_images]
+
+
+def search_bing_images(query, max_images):
+    """Scrape Bing Images search results (full-res murl URLs)."""
+    from urllib.parse import quote_plus
+    found, seen = [], set()
+    first = 1
+    page = 0
+    while len(found) < max_images and page < 30:
+        page += 1
+        search_url = (
+            f"https://www.bing.com/images/search?q={quote_plus(query)}"
+            f"&first={first}&count=35&form=HDRSC2"
+        )
+        try:
+            resp = session.get(search_url, timeout=30)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"  Bing search error: {e}")
+            break
+        html = resp.text
+        # murl holds the full-resolution image URL inside the m="{...}" JSON
+        murls = re.findall(r'&quot;murl&quot;:&quot;(.*?)&quot;', html)
+        murls += re.findall(r'"murl":"(.*?)"', html)
+        new = 0
+        for u in murls:
+            u = u.replace('\\/', '/').replace('&amp;', '&')
+            if u and u not in seen and is_valid_url(u):
+                seen.add(u)
+                found.append(u)
+                new += 1
+                if len(found) >= max_images:
+                    break
+        print(f"  [Bing page {page}] +{new} images (total {len(found)})")
+        if new == 0:
+            break
+        first += 35
+    return found[:max_images]
 
 
 def ext_for(url, content_type):
@@ -154,30 +259,44 @@ def download_image(url, output_dir, seen_hashes):
 
 def main():
     urls_str = os.getenv('URLS', '')
+    search_query = os.getenv('SEARCH_QUERY', '').strip()
     max_images = int(os.getenv('MAX_IMAGES', '500'))
-    workers = int(os.getenv('WORKERS', '16'))
-    if not urls_str:
-        print("Error: No URLs provided")
-        sys.exit(1)
-    urls = [u.strip() for u in urls_str.split(',') if u.strip()]
-    if not urls:
-        print("Error: No valid URLs provided")
-        sys.exit(1)
+    workers = int(os.getenv('WORKERS', '24'))
+    depth = int(os.getenv('CRAWL_DEPTH', '1'))
+    max_pages = int(os.getenv('MAX_PAGES', '40'))
 
     output_dir = 'downloaded_images'
     os.makedirs(output_dir, exist_ok=True)
-    print(f"Scraping {len(urls)} URL(s) | max {max_images}/URL | {workers} workers")
 
-    # Collect all image URLs first, dedupe across pages
     all_imgs, seen = [], set()
-    for i, url in enumerate(urls, 1):
-        print(f"\n[{i}/{len(urls)}] Scanning: {url}")
-        imgs = get_image_urls(url, max_images)
-        print(f"  Found {len(imgs)} image link(s)")
-        for u in imgs:
+
+    if search_query:
+        # --- SEARCH MODE: scrape Bing Images ---
+        print(f"Search mode | query: '{search_query}' | max {max_images} | {workers} workers")
+        for u in search_bing_images(search_query, max_images):
             if u not in seen:
                 seen.add(u)
                 all_imgs.append(u)
+    else:
+        # --- URL/CRAWL MODE ---
+        if not urls_str:
+            print("Error: No URLs or search query provided")
+            sys.exit(1)
+        urls = [normalize_url(u) for u in urls_str.split(',') if u.strip()]
+        if not urls:
+            print("Error: No valid URLs provided")
+            sys.exit(1)
+        print(f"Scraping {len(urls)} URL(s) | max {max_images} | depth {depth} | "
+              f"max {max_pages} pages | {workers} workers")
+        for i, url in enumerate(urls, 1):
+            print(f"\n[{i}/{len(urls)}] Crawling: {url}")
+            remaining = max_images - len(all_imgs)
+            if remaining <= 0:
+                break
+            for u in crawl_for_images(url, remaining, depth, max_pages):
+                if u not in seen:
+                    seen.add(u)
+                    all_imgs.append(u)
 
     print(f"\nTotal unique image links: {len(all_imgs)}")
     print("Downloading concurrently...")
