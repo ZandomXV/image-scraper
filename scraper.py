@@ -194,7 +194,7 @@ def search_bing_images(query, max_images):
         page += 1
         search_url = (
             f"https://www.bing.com/images/search?q={quote_plus(query)}"
-            f"&first={first}&count=35&form=HDRSC2"
+            f"&first={first}&count=35&form=HDRSC2&safesearch=off&adlt=off"
         )
         try:
             resp = session.get(search_url, timeout=30)
