@@ -185,87 +185,146 @@ def crawl_for_images(start_url, max_images, depth, max_pages):
 
 
 def search_bing_images(query, max_images):
-    """Search DuckDuckGo Images with SafeSearch OFF (kp=-1)."""
+    """Multi-engine image search with SafeSearch OFF. Tries DDG API, DDG HTML, Bing, and image sites."""
     from urllib.parse import quote_plus, urlencode
-    import json as _json
     found, seen = [], set()
 
     query_variants = [query, f"{query} photos", f"{query} images", f"{query} HD",
                       f"{query} wallpaper", f"{query} picture", f"{query} pic",
-                      f"{query} photo gallery", f'"{query}"', f"{query} site:pinterest.com"]
+                      f"{query} high quality", f'"{query}"', f"{query} site:imgur.com"]
 
+    # --- Engine 1: DuckDuckGo i.js API ---
+    print("  >> Trying DuckDuckGo API...")
     for qi, q in enumerate(query_variants):
         if len(found) >= max_images:
             break
         try:
-            # Get the vqd token from the main search page
             page_url = f"https://duckduckgo.com/?q={quote_plus(q)}&iax=images&ia=images"
             resp = session.get(page_url, timeout=30)
-            resp.raise_for_status()
             html = resp.text
-            # Extract vqd from the page
             vqd_match = re.search(r'vqd=["\']([^"\']+)["\']', html)
             if not vqd_match:
                 vqd_match = re.search(r'vqd=([a-f0-9-]+)', html)
             if not vqd_match:
-                print(f"  [DDG q='{q}'] Could not get vqd token, skipping")
+                vqd_match = re.search(r'vqd&quot;:&quot;([^&]+)&quot;', html)
+            if not vqd_match:
+                print(f"  [DDG API q='{q}'] No vqd token found")
                 continue
             vqd = vqd_match.group(1)
-
-            # Now fetch image results via the i.js endpoint
             s = 0
             while len(found) < max_images:
-                params = {
-                    'l': 'us-en',
-                    'o': 'json',
-                    'q': q,
-                    'vqd': vqd,
-                    'f': ',,,,,',
-                    'p': '1',
-                    'kp': '-1',  # SafeSearch OFF
-                    's': str(s),
-                }
+                params = {'l': 'us-en', 'o': 'json', 'q': q, 'vqd': vqd,
+                          'f': ',,,,,', 'p': '1', 'kp': '-1', 's': str(s)}
                 api_url = f"https://duckduckgo.com/i.js?{urlencode(params)}"
                 try:
                     resp2 = session.get(api_url, timeout=30)
-                    resp2.raise_for_status()
-                except Exception as e:
-                    print(f"  [DDG q='{q}' s={s}] API error: {e}")
-                    break
-
-                try:
                     data = resp2.json()
-                except Exception:
-                    print(f"  [DDG q='{q}' s={s}] No JSON response")
+                except Exception as e:
+                    print(f"  [DDG API q='{q}' s={s}] Error: {e}")
                     break
-
                 results = data.get('results', [])
                 if not results:
-                    print(f"  [DDG q='{q}' s={s}] No more results")
                     break
-
                 new = 0
                 for r in results:
                     u = r.get('image') or r.get('thumbnail') or ''
-                    if not u:
-                        continue
+                    if u and u not in seen and is_valid_url(u):
+                        seen.add(u); found.append(u); new += 1
+                        if len(found) >= max_images: break
+                print(f"  [DDG API q='{q}' s={s}] +{new} (total {len(found)})")
+                if new == 0: break
+                s += 100
+        except Exception as e:
+            print(f"  [DDG API q='{q}'] Error: {e}")
+
+    if len(found) >= max_images:
+        return found[:max_images]
+
+    # --- Engine 2: DuckDuckGo HTML endpoint ---
+    print(f"  >> Trying DDG HTML... (have {len(found)} so far)")
+    for q in query_variants:
+        if len(found) >= max_images:
+            break
+        try:
+            html_url = f"https://html.duckduckgo.com/html/?q={quote_plus(q)}&kp=-1"
+            resp = session.get(html_url, timeout=30)
+            html = resp.text
+            # DDG HTML has image URLs in data attributes and img tags
+            urls = re.findall(r'(https?://[^\s"\'<>]+\.(?:jpe?g|png|gif|webp|bmp|avif|tiff?)(?:\?[^\s"\'<>]*)?)', html, re.I)
+            new = 0
+            for u in urls:
+                u = u.replace('\\/', '/')
+                if u and u not in seen and is_valid_url(u):
+                    seen.add(u); found.append(u); new += 1
+                    if len(found) >= max_images: break
+            print(f"  [DDG HTML q='{q}'] +{new} (total {len(found)})")
+        except Exception as e:
+            print(f"  [DDG HTML q='{q}'] Error: {e}")
+
+    if len(found) >= max_images:
+        return found[:max_images]
+
+    # --- Engine 3: Bing Images with SafeSearch cookies ---
+    print(f"  >> Trying Bing Images... (have {len(found)} so far)")
+    bing_session = requests.Session()
+    bing_session.headers.update(HEADERS)
+    bing_session.cookies.set('SRCHHPGUSR', 'ADLT=OFF', domain='.bing.com')
+    bing_session.cookies.set('_EDGE_S', 'mkt=en-us&ui=en-us&ADLT=off', domain='.bing.com')
+    for q in query_variants:
+        if len(found) >= max_images:
+            break
+        first = 1
+        for page in range(1, 8):
+            if len(found) >= max_images:
+                break
+            search_url = (f"https://www.bing.com/images/search?q={quote_plus(q)}"
+                          f"&first={first}&count=35&safesearch=off&adlt=off")
+            try:
+                resp = bing_session.get(search_url, timeout=30)
+                html = resp.text
+                murls = re.findall(r'&quot;murl&quot;:&quot;(.*?)&quot;', html)
+                murls += re.findall(r'"murl":"(.*?)"', html)
+                murls += re.findall(r'murl&quot;:&quot;(.*?)&quot;', html)
+                new = 0
+                for u in murls:
+                    u = u.replace('\\/', '/').replace('&amp;', '&')
+                    if u and u not in seen and is_valid_url(u):
+                        seen.add(u); found.append(u); new += 1
+                        if len(found) >= max_images: break
+                print(f"  [Bing q='{q}' p{page}] +{new} (total {len(found)})")
+                if new == 0: break
+                first += 35
+            except Exception as e:
+                print(f"  [Bing q='{q}' p{page}] Error: {e}")
+                break
+
+    if len(found) >= max_images:
+        return found[:max_images]
+
+    # --- Engine 4: Direct scrape of image hosting sites ---
+    print(f"  >> Trying direct image sites... (have {len(found)} so far)")
+    for q in query_variants[:5]:
+        if len(found) >= max_images:
+            break
+        for site in ['https://imgur.com/search?q=', 'https://www.flickr.com/search/?text=']:
+            if len(found) >= max_images:
+                break
+            try:
+                url = site + quote_plus(q)
+                resp = session.get(url, timeout=30)
+                html = resp.text
+                urls = re.findall(r'(https?://[^\s"\'<>]+\.(?:jpe?g|png|gif|webp|bmp|avif)(?:\?[^\s"\'<>]*)?)', html, re.I)
+                new = 0
+                for u in urls:
                     u = u.replace('\\/', '/')
                     if u and u not in seen and is_valid_url(u):
-                        seen.add(u)
-                        found.append(u)
-                        new += 1
-                        if len(found) >= max_images:
-                            break
+                        seen.add(u); found.append(u); new += 1
+                        if len(found) >= max_images: break
+                print(f"  [Direct {site.split('/')[2]} q='{q}'] +{new} (total {len(found)})")
+            except Exception as e:
+                print(f"  [Direct {site} q='{q}'] Error: {e}")
 
-                print(f"  [DDG q='{q}' s={s}] +{new} images (total {len(found)})")
-                if new == 0:
-                    break
-                s += 100
-
-        except Exception as e:
-            print(f"  [DDG q='{q}'] Error: {e}")
-            continue
-
+    print(f"  >> Search complete: {len(found)} unique images found")
     return found[:max_images]
 
 
