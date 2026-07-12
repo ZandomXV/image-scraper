@@ -1,10 +1,10 @@
-name: Image Scraper
+name: Scrape Images
 
 on:
   workflow_dispatch:
     inputs:
       search_query:
-        description: 'Search Bing Images for this term (leave URLs empty if using this)'
+        description: 'Search term (leave URLs empty if using search)'
         required: false
         type: string
       urls:
