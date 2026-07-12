@@ -3,15 +3,29 @@ name: Image Scraper
 on:
   workflow_dispatch:
     inputs:
+      search_query:
+        description: 'Search Bing Images for this term (leave URLs empty if using this)'
+        required: false
+        type: string
       urls:
-        description: 'Comma-separated list of URLs to scrape for images'
-        required: true
+        description: 'Comma-separated URLs to scrape (leave empty if using search)'
+        required: false
         type: string
       max_images:
-        description: 'Maximum number of images to scrape per URL (default: 500)'
+        description: 'Maximum total images (default: 500)'
         required: false
         type: number
         default: 500
+      crawl_depth:
+        description: 'How many link levels to follow (0 = just the page)'
+        required: false
+        type: number
+        default: 1
+      max_pages:
+        description: 'Max pages to crawl per URL (default: 40)'
+        required: false
+        type: number
+        default: 40
 
 jobs:
   scrape-images:
@@ -33,8 +47,11 @@ jobs:
 
       - name: Run image scraper
         env:
+          SEARCH_QUERY: ${{ inputs.search_query }}
           URLS: ${{ inputs.urls }}
           MAX_IMAGES: ${{ inputs.max_images }}
+          CRAWL_DEPTH: ${{ inputs.crawl_depth }}
+          MAX_PAGES: ${{ inputs.max_pages }}
         run: python scraper.py
 
       - name: Create zip archive
