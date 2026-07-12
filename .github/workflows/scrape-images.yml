@@ -8,10 +8,10 @@ on:
         required: true
         type: string
       max_images:
-        description: 'Maximum number of images to scrape per URL (default: 50)'
+        description: 'Maximum number of images to scrape per URL (default: 500)'
         required: false
         type: number
-        default: 50
+        default: 500
 
 jobs:
   scrape-images:
@@ -39,6 +39,13 @@ jobs:
 
       - name: Create zip archive
         run: |
+          mkdir -p downloaded_images
+          count=$(find downloaded_images -type f | wc -l)
+          echo "Image files found: $count"
+          if [ "$count" -eq 0 ]; then
+            echo "No images were scraped. Adding a note file so the archive is still produced."
+            echo "No images were found for the provided URL(s)." > downloaded_images/NO_IMAGES_FOUND.txt
+          fi
           cd downloaded_images
           zip -r ../images.zip .
 
